@@ -5,3 +5,7 @@ seaborn
 urlextract
 emoji
 wordcloud
+xgboost
+scikit-learn
+transformers
+torch
