@@ -5,6 +5,8 @@ import emoji
 from sklearn.preprocessing import LabelEncoder
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
+from sklearn.utils import class_weight 
+import numpy as np
 from xgboost import XGBClassifier
 from transformers import pipeline
 import streamlit as st
@@ -18,17 +20,14 @@ def load_sentiment_model():
 # --- ANALYSIS FUNCTIONS ---
 
 def get_sentiment_analysis(selected_user, df):
-    # FIX: Call the cached loader function here
     sentiment_analyzer = load_sentiment_model()
     
     if selected_user != 'Overall':
         df = df[df['user'] == selected_user]
     
-    # 1. Clean: Remove system notifications and media
     temp = df[df['user'] != 'group_notification']
     temp = temp[temp['message'] != '<Media omitted>\n']
     
-    # 2. Limit: Analyze the last 30 messages to keep the app fast
     messages = temp['message'].tail(30).tolist()
     
     if not messages:
@@ -41,37 +40,47 @@ def train_user_prediction_model(df):
     df = df[df['user'] != 'group_notification']
     df = df[~df['message'].str.contains('<Media omitted>')]
     
-    # Filter users with > 5 messages to ensure the model has enough data
+    # Ensure every user has at least 10 messages for a safe stratified split
     user_counts = df['user'].value_counts()
-    valid_users = user_counts[user_counts > 5].index
+    valid_users = user_counts[user_counts >= 10].index 
     df = df[df['user'].isin(valid_users)]
     
+    if df.empty:
+        return 0, None, None, None, []
+        
     df = df.dropna(subset=['user', 'message'])
 
     # 2. Encode Target
     le = LabelEncoder()
     y = le.fit_transform(df['user'])
     
-    # 3. Vectorize (Using N-grams to pick up phrases)
-    tfidf = TfidfVectorizer(max_features=2000, stop_words='english', ngram_range=(1,2))
+    # --- NEW: Extract Common Words ---
+    # This helps identify phrases that everyone uses, which usually have low confidence
+    all_words = " ".join(df['message'].astype(str)).lower().split()
+    common_words = [word for word, count in Counter(all_words).most_common(25)]
+    
+    # 3. Vectorize
+    tfidf = TfidfVectorizer(max_features=3000, stop_words='english', ngram_range=(1,2), min_df=1)
     X = tfidf.fit_transform(df['message']).toarray()
     
-    # 4. Train-Test Split (with stratify to keep user proportions even)
+    # 4. Train-Test Split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
     
-    # 5. XGBoost Model
+    # 5. XGBoost Model with Balanced Weights
     model = XGBClassifier(
-        n_estimators=200, 
-        learning_rate=0.05, 
-        max_depth=6, 
+        n_estimators=300,        
+        learning_rate=0.03,      
+        max_depth=8,             
         eval_metric='mlogloss',
-        tree_method='hist' 
+        tree_method='hist'
     )
     
-    model.fit(X_train, y_train)
+    sample_weights = class_weight.compute_sample_weight(class_weight='balanced', y=y_train)
+    model.fit(X_train, y_train, sample_weight=sample_weights)
     accuracy = model.score(X_test, y_test)
     
-    return round(accuracy * 100, 2), model, tfidf, le
+    # Returning 5 values now: Accuracy, Model, Vectorizer, LabelEncoder, and CommonWords
+    return round(accuracy * 100, 2), model, tfidf, le, common_words
 
 def create_wordcloud(selected_user, df):
     if selected_user != 'Overall':
@@ -100,17 +109,23 @@ def emoji_helper(selected_user, df):
 
 def most_busy_users(df):
     x = df['user'].value_counts().head()
-    df_percent = round((df['user'].value_counts() / df.shape[0]) * 100, 2).reset_index().rename(
-        columns={'index': 'User Name', 'user': 'Percent (%)'})
+    df_percent = round((df['user'].value_counts() / df.shape[0]) * 100, 2).reset_index()
+    if 'index' in df_percent.columns:
+        df_percent.columns = ['User Name', 'Percent (%)']
+    else:
+        df_percent.columns = ['User Name', 'Percent (%)']
     return x, df_percent
 
 def monthly_timeline(selected_user, df):
     if selected_user != 'Overall':
         df = df[df['user'] == selected_user]
 
-    timeline = df.groupby(['year', 'month']).count()['message'].reset_index()
+    timeline = df.groupby(['year', 'month_num', 'month']).count()['message'].reset_index()
+    timeline = timeline.sort_values(['year', 'month_num'])
+
     time = []
     for i in range(timeline.shape[0]):
         time.append(timeline['month'][i] + "-" + str(timeline['year'][i]))
+
     timeline['time'] = time
     return timeline

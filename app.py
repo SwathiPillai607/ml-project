@@ -2,6 +2,7 @@ import streamlit as st
 import preprocessor, helper
 import matplotlib.pyplot as plt
 import seaborn as sns
+import numpy as np
 
 # 1. Page Configuration
 st.set_page_config(layout="wide", page_title="WhatsApp Chat Analyzer")
@@ -17,9 +18,9 @@ if uploaded_file is not None:
     data = bytes_data.decode("utf-8")
     df = preprocessor.preprocess(data)
 
-    # 3. Validation Check: Ensure the file was parsed correctly
+    # 3. Validation Check
     if df.empty:
-        st.error("The uploaded file could not be parsed. Please ensure it is a valid WhatsApp export (.txt) with the correct date/time format.")
+        st.error("The uploaded file could not be parsed correctly.")
     else:
         # Fetch unique users for dropdown
         user_list = df['user'].unique().tolist()
@@ -30,23 +31,15 @@ if uploaded_file is not None:
 
         selected_user = st.sidebar.selectbox("Show analysis for:", user_list)
 
-        # --- Sidebar Button logic using session state to prevent reload issues ---
         if st.sidebar.button("Show Analysis"):
             st.session_state['analysis_clicked'] = True
 
-        # Only run the analysis if the button was clicked OR if it was already active
         if st.session_state.get('analysis_clicked'):
             
-            # --- LEVEL 1: TOP STATISTICS (KPI CARDS) ---
             st.title("Top Statistics")
             
             num_messages = df.shape[0] if selected_user == 'Overall' else df[df['user'] == selected_user].shape[0]
-            
-            # Calculate words
-            if selected_user != 'Overall':
-                temp_df = df[df['user'] == selected_user]
-            else:
-                temp_df = df
+            temp_df = df if selected_user == 'Overall' else df[df['user'] == selected_user]
                 
             words = []
             for message in temp_df['message']:
@@ -55,7 +48,6 @@ if uploaded_file is not None:
             num_media = temp_df[temp_df['message'] == '<Media omitted>\n'].shape[0]
             num_links = temp_df[temp_df['message'].str.contains('http')].shape[0]
 
-            # Displaying Metrics in 4 columns
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Total Messages", num_messages)
@@ -123,50 +115,78 @@ if uploaded_file is not None:
             with tab4:
                 st.header("🤖 Advanced Machine Learning Insights")
                 
-                # --- Sentiment Analysis (BERT) ---
+                # Sentiment Analysis
                 st.subheader("Message Sentiment Analysis (BERT)")
-                with st.spinner("Analyzing tone of recent messages..."):
+                with st.spinner("Analyzing tone..."):
                     results = helper.get_sentiment_analysis(selected_user, df)
                     if results:
                         sentiments = [res['label'] for res in results]
-                        pos_count = sentiments.count('POSITIVE')
-                        neg_count = sentiments.count('NEGATIVE')
-                        
+                        pos_count, neg_count = sentiments.count('POSITIVE'), sentiments.count('NEGATIVE')
                         col_s1, col_s2 = st.columns(2)
                         with col_s1:
-                            st.metric("Positive Tone Count", pos_count)
-                            st.metric("Negative Tone Count", neg_count)
+                            st.metric("Positive Tone", pos_count)
+                            st.metric("Negative Tone", neg_count)
                         with col_s2:
                             fig_s, ax_s = plt.subplots()
                             ax_s.pie([pos_count, neg_count], labels=['Positive', 'Negative'], 
                                      autopct='%1.1f%%', colors=['#25D366', '#FF4B4B'])
                             st.pyplot(fig_s)
-                    else:
-                        st.info("Not enough text data to perform sentiment analysis.")
-                
+
                 st.markdown("---")
                 
-                # --- User Prediction (XGBoost) ---
+                # User Prediction
                 st.subheader("User Identification Model (XGBoost)")
                 if st.button("Train / Refresh Model", key="train_button"):
-                    with st.spinner("Training XGBoost model... this may take a moment."):
-                        accuracy, model, vectorizer, le = helper.train_user_prediction_model(df)
-                        st.session_state['accuracy'] = accuracy
-                        st.session_state['model'] = model
-                        st.session_state['vectorizer'] = vectorizer
-                        st.session_state['le'] = le
-                        st.session_state['model_trained'] = True
-                        st.success("Model Training Complete!")
+                    with st.spinner("Training balanced XGBoost model..."):
+                        # Unpacking all 5 values from helper
+                        accuracy, model, vectorizer, le, common_words = helper.train_user_prediction_model(df)
+                        
+                        if model is not None:
+                            st.session_state.update({
+                                'accuracy': accuracy, 
+                                'model': model, 
+                                'vectorizer': vectorizer, 
+                                'le': le, 
+                                'common_words': common_words,
+                                'model_trained': True
+                            })
+                            st.success("Model Training Complete!")
+                        else:
+                            st.error("Not enough data. Users need at least 10 messages.")
 
                 if st.session_state.get('model_trained'):
                     st.metric("Model Accuracy", f"{st.session_state['accuracy']}%")
                     st.markdown("---")
                     st.subheader("Predict User from Message")
                     sample_message = st.text_input("Type a message to identify the sender:", key="predict_input")
+                    
                     if sample_message:
                         features = st.session_state['vectorizer'].transform([sample_message])
-                        prediction = st.session_state['model'].predict(features)
-                        predicted_user = st.session_state['le'].inverse_transform(prediction)[0]
-                        st.success(f"The model predicts this sender is: **{predicted_user}**")
+                        probs = st.session_state['model'].predict_proba(features)[0]
+                        
+                        top_indices = np.argsort(probs)[-3:][::-1]
+                        top_predictions = [
+                            (st.session_state['le'].inverse_transform([i])[0], probs[i]) 
+                            for i in top_indices
+                        ]
+                        
+                        # Logic for common phrases
+                        is_common = any(word in sample_message.lower() for word in st.session_state.get('common_words', []))
+                        
+                        if is_common:
+                            threshold = 0.12 
+                        else:
+                            threshold = 0.18 if len(sample_message.split()) < 3 else 0.25
+                        
+                        if top_predictions[0][1] < threshold:
+                            st.warning(f"Confidence too low ({round(top_predictions[0][1]*100, 2)}%).")
+                        else:
+                            st.success(f"Top Candidate: **{top_predictions[0][0]}** ({round(top_predictions[0][1]*100, 2)}% confidence)")
+                            
+                            other_candidates = [p for p in top_predictions[1:] if p[1] > 0.12]
+                            if other_candidates:
+                                st.write("Other likely senders:")
+                                for name, score in other_candidates:
+                                    st.info(f"**{name}** ({round(score*100, 2)}% confidence)")
                 else:
-                    st.info("Click the 'Train' button above to initialize the Machine Learning model.")
+                    st.info("Click 'Train' to initialize the Machine Learning model.")

@@ -1,5 +1,6 @@
 import re
 import pandas as pd
+import datetime
 
 def preprocess(data):
     # Flexible pattern for date/time
@@ -16,6 +17,14 @@ def preprocess(data):
     # Using errors='coerce' will prevent crashing if a line is weird
     df['date'] = pd.to_datetime(df['message_date'], errors='coerce')
     
+    # Drop any rows where the date failed to parse
+    df = df.dropna(subset=['date'])
+
+    # --- FIX: DATE GUARD ---
+    # This removes any messages that have dates in the future (e.g., April/May 2026)
+    current_time = datetime.datetime.now()
+    df = df[df['date'] <= current_time]
+    
     users = []
     messages = []
     for message in df['user_message']:
@@ -31,11 +40,11 @@ def preprocess(data):
     df['message'] = messages
     df.drop(columns=['user_message', 'message_date'], inplace=True)
     
-    # Drop any rows where the date failed to parse
-    df = df.dropna(subset=['date'])
+    # Time-based features for analysis and sorting
     df['year'] = df['date'].dt.year
+    df['month_num'] = df['date'].dt.month  # Added for chronological sorting
     df['month'] = df['date'].dt.month_name()
-    # Optional but helpful for other charts:
     df['day'] = df['date'].dt.day
     df['hour'] = df['date'].dt.hour
+    
     return df
