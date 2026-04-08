@@ -103,7 +103,7 @@ if uploaded_file is not None:
                         plt.axis("off")
                         st.pyplot(fig)
                     else:
-                        st.write("No words found for this user.")
+                        st.write("No words found.")
                 with col_y:
                     st.subheader("Most Common Emojis")
                     emoji_df = helper.emoji_helper(selected_user, df)
@@ -115,13 +115,14 @@ if uploaded_file is not None:
             with tab4:
                 st.header("🤖 Advanced Machine Learning Insights")
                 
-                # Sentiment Analysis
+                # --- Sentiment Analysis (BERT) ---
                 st.subheader("Message Sentiment Analysis (BERT)")
                 with st.spinner("Analyzing tone..."):
                     results = helper.get_sentiment_analysis(selected_user, df)
                     if results:
                         sentiments = [res['label'] for res in results]
                         pos_count, neg_count = sentiments.count('POSITIVE'), sentiments.count('NEGATIVE')
+                        
                         col_s1, col_s2 = st.columns(2)
                         with col_s1:
                             st.metric("Positive Tone", pos_count)
@@ -131,14 +132,16 @@ if uploaded_file is not None:
                             ax_s.pie([pos_count, neg_count], labels=['Positive', 'Negative'], 
                                      autopct='%1.1f%%', colors=['#25D366', '#FF4B4B'])
                             st.pyplot(fig_s)
+                    else:
+                        st.info("Not enough text data to perform sentiment analysis.")
 
                 st.markdown("---")
                 
-                # User Prediction
+                # --- User Prediction (XGBoost) ---
                 st.subheader("User Identification Model (XGBoost)")
                 if st.button("Train / Refresh Model", key="train_button"):
                     with st.spinner("Training balanced XGBoost model..."):
-                        # Unpacking all 5 values from helper
+                        # Unpacking the 5 values from helper.py
                         accuracy, model, vectorizer, le, common_words = helper.train_user_prediction_model(df)
                         
                         if model is not None:
@@ -152,8 +155,9 @@ if uploaded_file is not None:
                             })
                             st.success("Model Training Complete!")
                         else:
-                            st.error("Not enough data. Users need at least 10 messages.")
+                            st.error("Not enough data. Ensure users have at least 3 messages.")
 
+                # Only show prediction UI if the model has been trained
                 if st.session_state.get('model_trained'):
                     st.metric("Model Accuracy", f"{st.session_state['accuracy']}%")
                     st.markdown("---")
@@ -164,19 +168,16 @@ if uploaded_file is not None:
                         features = st.session_state['vectorizer'].transform([sample_message])
                         probs = st.session_state['model'].predict_proba(features)[0]
                         
+                        # Get top 3 candidates
                         top_indices = np.argsort(probs)[-3:][::-1]
                         top_predictions = [
                             (st.session_state['le'].inverse_transform([i])[0], probs[i]) 
                             for i in top_indices
                         ]
                         
-                        # Logic for common phrases
+                        # Threshold Logic
                         is_common = any(word in sample_message.lower() for word in st.session_state.get('common_words', []))
-                        
-                        if is_common:
-                            threshold = 0.12 
-                        else:
-                            threshold = 0.18 if len(sample_message.split()) < 3 else 0.25
+                        threshold = 0.10 if is_common else 0.15
                         
                         if top_predictions[0][1] < threshold:
                             st.warning(f"Confidence too low ({round(top_predictions[0][1]*100, 2)}%).")
@@ -189,4 +190,4 @@ if uploaded_file is not None:
                                 for name, score in other_candidates:
                                     st.info(f"**{name}** ({round(score*100, 2)}% confidence)")
                 else:
-                    st.info("Click 'Train' to initialize the Machine Learning model.")
+                    st.info("Click the 'Train / Refresh Model' button above to initialize the Machine Learning model.")
